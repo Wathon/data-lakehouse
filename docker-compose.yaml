@@ -1,0 +1,150 @@
+version: '3'
+services:
+  mage:
+    image: mage
+    container_name: mage 
+    ports:
+      - "6789:6789"
+    volumes:
+      - .:/home/mage_code
+    environment:
+    #To avoid adding too many variables here consider using
+    #-.env instead where you define what variables you need
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      ENV: ${ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      KAFKA_SCHEMA_REGISTRY: ${KAFKA_SCHEMA_REGISTRY}
+      SCHEMA_REGISTRY_USERNAME: ${SCHEMA_REGISTRY_USERNAME}
+      SCHEMA_REGISTRY_PASSWORD: ${SCHEMA_REGISTRY_PASSWORD}
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      KAFKA_CLIENT_ID: ${KAFKA_CLIENT_ID}
+      KAFKA_CLIENT_ID_BATCH: ${KAFKA_CLIENT_ID_BATCH}
+      KAFKA_GROUP_ID: ${KAFKA_GROUP_ID}
+      KAFKA_GROUP_ID_BATCH: ${KAFKA_GROUP_ID_BATCH}
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_BATCH_TOPIC: ${KAFKA_BATCH_TOPIC}
+      KAFKA_STREAM_TOPIC: ${KAFKA_STREAM_TOPIC}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MAGE_SLACK_WEBHOOK_URL: ${MAGE_SLACK_WEBHOOK_URL}
+    networks:
+      - nessie_network
+
+  dremio:
+    platform: linux/x86_64
+    image: dremio/dremio-oss:latest
+    ports:
+      - 9047:9047
+      - 31010:31010
+      - 32010:32010
+    container_name: dremio
+    networks:
+      - nessie_network
+        
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.94.4
+    container_name: nessie
+    ports:
+      - "19120:19120"
+    environment:
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3://iceberg-demo-nessie/
+      - nessie.catalog.service.s3.default-options.region=us-east-1
+      - nessie.catalog.service.s3.default-options.path-style-access=true
+      - nessie.catalog.service.s3.default-options.access-key.name=${MINIO_ACCESS_KEY}
+      - nessie.catalog.service.s3.default-options.access-key.secret=${MINIO_SECRET_KEY}
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000/
+
+    networks:
+      - nessie_network
+    
+  minio:
+    container_name: minio
+    image: quay.io/minio/minio
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - './minio_data:/data'
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+      - MINIO_DOMAIN=storage
+      - MINIO_REGION_NAME=us-east-1
+      - MINIO_REGION=us-east-1
+    command: server --console-address ":9001" /data
+    networks:
+      - nessie_network
+  
+  minio-client:
+    image: minio/mc:latest
+    container_name: minio-client
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set myminio http://minio:9000 zefko sparkTutorial); do echo 'waiting for minio...'; sleep 3; done;
+      mc mb myminio/iceberg-demo-nessie;
+      "
+    networks:
+      - nessie_network
+  
+  starrocks-fe-0:
+    image: starrocks/fe-ubuntu:latest
+    hostname: starrocks-fe-0
+    container_name: starrocks-fe-0
+    command:
+      - /bin/bash
+      - -c
+      - |
+        /opt/starrocks/fe_entrypoint.sh starrocks-fe-0
+    environment:
+      - HOST_TYPE=FQDN
+      - TZ=Asia/Yangon
+      - AWS_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}
+    ports:
+      - "8030:8030"
+      - "9020:9020"
+      - "9030:9030"
+    volumes:
+       - singleton_fe0_data:/opt/starrocks/fe/meta
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9030"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - nessie_network
+
+  starrocks-be-0:
+    image: starrocks/be-ubuntu:latest
+    hostname: starrocks-be-0
+    container_name: starrocks-be-0
+    command:
+      - /bin/bash
+      - -c
+      - |
+        /opt/starrocks/be_entrypoint.sh starrocks-fe-0
+    environment:
+      - HOST_TYPE=FQDN
+      - TZ=Asia/Yangon
+    ports:
+      - "8040:8040"
+    depends_on:
+      - starrocks-fe-0
+    volumes:
+      - singleton_be0_data:/opt/starrocks/be/storage
+    networks:
+      - nessie_network
+
+networks:
+  nessie_network:
+    driver: bridge
+
+volumes:
+  minio_data:
+  singleton_fe0_data:
+  singleton_be0_data:
